@@ -2,13 +2,13 @@ import { useOpenSCAD } from '@/hooks/useOpenSCAD';
 import { useEffect, useState, useContext, useRef } from 'react';
 import { ThreeScene } from '@/components/viewer/ThreeScene';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
-import { BufferGeometry } from 'three';
+import { BufferGeometry, Vector3 } from 'three';
 import { Loader2, CircleAlert, Wrench } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import OpenSCADError from '@/lib/OpenSCADError';
 import { cn } from '@/lib/utils';
 import { MeshFilesContext } from '@/contexts/MeshFilesContext';
-
+import { ClickData } from '@/contexts/ClickContext';
 // Extract import() filenames from OpenSCAD code
 function extractImportFilenames(code: string): string[] {
   const importRegex = /import\s*\(\s*"([^"]+)"\s*\)/g;
@@ -27,6 +27,9 @@ interface OpenSCADPreviewProps {
   fixError?: (error: OpenSCADError) => void;
   isMobile?: boolean;
   backgroundColor?: string;
+  onMeshClick?: (data: ClickData) => void;
+  clickData?: ClickData | null;
+  previewCode?: string | null;
 }
 
 export function OpenSCADPreview({
@@ -36,10 +39,18 @@ export function OpenSCADPreview({
   fixError,
   isMobile,
   backgroundColor,
+  onMeshClick,
+  clickData,
+  previewCode,
 }: OpenSCADPreviewProps) {
   const { compileScad, writeFile, isCompiling, output, isError, error } =
     useOpenSCAD();
+  const { compileScad: previewCompile, output: previewOutput } = useOpenSCAD();
   const [geometry, setGeometry] = useState<BufferGeometry | null>(null);
+  const [previewGeometry, setPreviewGeometry] = useState<BufferGeometry | null>(
+    null,
+  );
+  const [centeringOffset, setCenteringOffset] = useState<Vector3 | null>(null);
   // Use context directly to avoid throwing if provider is not mounted (e.g. VisualCard)
   const meshFilesCtx = useContext(MeshFilesContext);
   // Track which files we've written to avoid re-writing unchanged blobs
@@ -83,7 +94,11 @@ export function OpenSCADPreview({
       output.arrayBuffer().then((buffer) => {
         const loader = new STLLoader();
         const geom = loader.parse(buffer);
+        geom.computeBoundingBox();
+        const center = new Vector3();
+        geom.boundingBox!.getCenter(center);
         geom.center();
+        setCenteringOffset(center);
         geom.computeVertexNormals();
         setGeometry(geom);
       });
@@ -91,6 +106,34 @@ export function OpenSCADPreview({
       setGeometry(null);
     }
   }, [output, onOutputChange]);
+
+  // Compile preview code when slider is being dragged
+  useEffect(() => {
+    if (previewCode) {
+      previewCompile(previewCode);
+    } else {
+      setPreviewGeometry(null);
+    }
+  }, [previewCode, previewCompile]);
+
+  // Parse preview STL → geometry (cancelled if previewCode clears mid-parse)
+  useEffect(() => {
+    if (!previewCode) return;
+    let cancelled = false;
+    if (previewOutput && previewOutput instanceof Blob) {
+      previewOutput.arrayBuffer().then((buffer) => {
+        if (cancelled) return;
+        const loader = new STLLoader();
+        const geom = loader.parse(buffer);
+        geom.center();
+        geom.computeVertexNormals();
+        setPreviewGeometry(geom);
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [previewOutput, previewCode]);
 
   return (
     <div className="h-full w-full bg-adam-neutral-700/50 shadow-lg backdrop-blur-sm transition-all duration-300 ease-in-out">
@@ -102,6 +145,10 @@ export function OpenSCADPreview({
               color={color}
               isMobile={isMobile}
               backgroundColor={backgroundColor}
+              onMeshClick={onMeshClick}
+              clickData={clickData}
+              previewGeometry={previewCode ? previewGeometry : null}
+              centeringOffset={centeringOffset}
             />
           </div>
         ) : (

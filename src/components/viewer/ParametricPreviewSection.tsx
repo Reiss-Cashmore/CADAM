@@ -3,13 +3,16 @@ import { useCurrentMessage } from '@/contexts/CurrentMessageContext';
 import Loader from '@/components/viewer/Loader';
 import { OpenSCADPreview } from './OpenSCADViewer';
 import OpenSCADError from '@/lib/OpenSCADError';
-
+import { ClickData } from '@/contexts/ClickContext';
 interface ParametricPreviewSectionProps {
   isLoading: boolean;
   color: string;
   onOutputChange?: (output: Blob | undefined) => void;
   fixError?: (error: OpenSCADError) => void;
   isMobile?: boolean;
+  onMeshClick?: (data: ClickData) => void;
+  clickData?: ClickData | null;
+  previewCode?: string | null;
 }
 
 export function ParametricPreviewSection({
@@ -18,6 +21,9 @@ export function ParametricPreviewSection({
   onOutputChange,
   fixError,
   isMobile,
+  onMeshClick,
+  clickData,
+  previewCode,
 }: ParametricPreviewSectionProps) {
   const { currentMessage: message } = useCurrentMessage();
 
@@ -40,6 +46,9 @@ export function ParametricPreviewSection({
               color={color}
               onOutputChange={onOutputChange}
               fixError={fixError}
+              onMeshClick={onMeshClick}
+              clickData={clickData}
+              previewCode={previewCode}
             />
           )}
         </div>

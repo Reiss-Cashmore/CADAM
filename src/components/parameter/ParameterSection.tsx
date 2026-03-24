@@ -27,6 +27,8 @@ interface ParameterSectionProps {
   currentOutput?: Blob;
   color: string;
   setColor: (color: string) => void;
+  onParameterLiveChange?: (param: Parameter, value: Parameter['value']) => void;
+  onParameterDragEnd?: () => void;
 }
 
 export function ParameterSection({
@@ -35,6 +37,8 @@ export function ParameterSection({
   currentOutput,
   color,
   setColor,
+  onParameterLiveChange,
+  onParameterDragEnd,
 }: ParameterSectionProps) {
   const { currentMessage } = useCurrentMessage();
   const [selectedFormat, setSelectedFormat] = useState<'stl' | 'scad'>('stl');
@@ -148,6 +152,8 @@ export function ParameterSection({
                 key={param.name}
                 param={param}
                 handleCommit={handleCommit}
+                onLiveChange={onParameterLiveChange}
+                onDragEnd={onParameterDragEnd}
               />
             ))}
           </div>

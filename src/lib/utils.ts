@@ -274,6 +274,18 @@ export const PARAMETRIC_MODELS: ModelConfig[] = [
   },
 ];
 
+if (import.meta.env.VITE_CUSTOM_LLM_NAME) {
+  PARAMETRIC_MODELS.push({
+    id: 'custom',
+    name: import.meta.env.VITE_CUSTOM_LLM_NAME,
+    description: 'Custom locally-hosted model',
+    provider: 'Custom',
+    supportsTools: true,
+    supportsThinking: false,
+    supportsVision: false,
+  });
+}
+
 export const CREATIVE_MODELS: ModelConfig[] = [
   {
     id: 'ultra',

@@ -31,7 +31,6 @@ function ParameterSliderBase({
       onValueChange={([newValue]) => onValueChange(newValue)}
       onValueCommit={([newValue]) => {
         onValueCommit(newValue);
-        onValueChange(newValue);
       }}
       min={min}
       max={max}

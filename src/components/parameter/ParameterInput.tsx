@@ -8,13 +8,24 @@ import {
 } from '@/utils/parameterUtils';
 import { ParameterSlider } from '@/components/parameter/ParameterSlider';
 import { Label } from '@/components/ui/label';
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem,
+} from '@/components/ui/select';
 
 export function ParameterInput({
   param,
   handleCommit,
+  onLiveChange,
+  onDragEnd,
 }: {
   param: Parameter;
   handleCommit: (param: Parameter, value: Parameter['value']) => void;
+  onLiveChange?: (param: Parameter, value: Parameter['value']) => void;
+  onDragEnd?: () => void;
 }) {
   const [paramState, setParamState] = useState<Parameter>(param);
 
@@ -37,6 +48,40 @@ export function ParameterInput({
     handleCommit(paramState, value);
   };
 
+  if (paramState.options && paramState.options.length > 0) {
+    return (
+      <div className="grid w-full grid-cols-[80px_1fr] items-center gap-3">
+        <Label
+          className="overflow-hidden text-ellipsis text-xs font-normal text-adam-neutral-300"
+          htmlFor={paramState.name}
+        >
+          {paramState.displayName}
+        </Label>
+        <Select
+          value={String(paramState.value)}
+          onValueChange={(v) => {
+            const typed = paramState.type === 'number' ? parseFloat(v) : v;
+            handleValueCommit(typed);
+          }}
+        >
+          <SelectTrigger
+            id={paramState.name}
+            className="h-6 w-full rounded-md border-none bg-adam-neutral-800 px-2 text-xs text-adam-text-primary shadow-none hover:bg-adam-neutral-700"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {paramState.options.map((opt) => (
+              <SelectItem key={String(opt.value)} value={String(opt.value)}>
+                {opt.label ?? String(opt.value)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+    );
+  }
+
   if (!paramState.type || paramState.type === 'number') {
     return (
       <div className="grid w-full grid-cols-[80px_1fr] items-center gap-3">
@@ -49,8 +94,14 @@ export function ParameterInput({
         <div className="flex w-full items-center gap-3">
           <ParameterSlider
             param={paramState}
-            onValueChange={handleValueChange}
-            onValueCommit={handleValueCommit}
+            onValueChange={(v) => {
+              handleValueChange(v);
+              onLiveChange?.(paramState, v);
+            }}
+            onValueCommit={(v) => {
+              handleValueCommit(v);
+              onDragEnd?.();
+            }}
           />
           <div className="flex flex-shrink-0 items-center gap-2">
             <Input

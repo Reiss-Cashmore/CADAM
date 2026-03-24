@@ -1,6 +1,7 @@
 import { ChatSection } from '@/components/chat/ChatSection';
 import { ParameterSection } from '@/components/parameter/ParameterSection';
 import { Content, Message, Model, Parameter } from '@shared/types';
+import { updateParameter } from '@/utils/parameterUtils';
 import OpenSCADError from '@/lib/OpenSCADError';
 import { useRef, useState, useMemo, useCallback } from 'react';
 import {
@@ -16,6 +17,8 @@ import { ChevronsRight } from 'lucide-react';
 import { TreeNode } from '@shared/Tree';
 import { ParametricPreviewSection } from '@/components/viewer/ParametricPreviewSection';
 import { ParametricPreviewDialog } from '@/components/viewer/ParametricPreviewDialog';
+import { ClickData } from '@/contexts/ClickContext';
+import { MiniChat } from '@/components/chat/MiniChat';
 
 // Panel size constants
 const PANEL_SIZES = {
@@ -75,6 +78,9 @@ export default function ParametricView({
   const [isParametersPanelCollapsed, setIsParametersPanelCollapsed] =
     useState(false);
   const [isChatCollapsed, setIsChatCollapsed] = useState(false);
+  const [clickData, setClickData] = useState<ClickData | null>(null);
+  const [previewCode, setPreviewCode] = useState<string | null>(null);
+  const previewDebounceRef = useRef<NodeJS.Timeout | null>(null);
   const chatPanelRef = useRef<ImperativePanelHandle>(null);
   const parameterPanelRef = useRef<ImperativePanelHandle>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
@@ -185,6 +191,47 @@ export default function ParametricView({
     }
   }, []);
 
+  const handleMeshClick = useCallback((data: ClickData) => {
+    setClickData(data);
+  }, []);
+
+  const handleMiniChatSubmit = useCallback(
+    (message: string, click: ClickData) => {
+      if (!sendMessage) return;
+      const pos = click.scadPosition ?? click.position;
+      const norm = click.scadNormal ?? click.normal;
+      const enhancedMessage = `Context: User clicked at position [${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)}] with surface normal [${norm.x.toFixed(2)}, ${norm.y.toFixed(2)}, ${norm.z.toFixed(2)}], distance from origin: ${click.distanceFromOrigin.toFixed(2)}.\n\nUser request: ${message}`;
+      sendMessage({ text: enhancedMessage });
+      setClickData(null);
+    },
+    [sendMessage],
+  );
+
+  const handleParameterLiveChange = useCallback(
+    (param: Parameter, value: Parameter['value']) => {
+      const code = currentMessage?.content.artifact?.code;
+      if (!code) return;
+
+      const nudgedParam = { ...param, value };
+      const nudgedCode = updateParameter(code, nudgedParam);
+
+      if (previewDebounceRef.current) {
+        clearTimeout(previewDebounceRef.current);
+      }
+      previewDebounceRef.current = setTimeout(() => {
+        setPreviewCode(nudgedCode);
+      }, 300);
+    },
+    [currentMessage],
+  );
+
+  const handleParameterDragEnd = useCallback(() => {
+    if (previewDebounceRef.current) {
+      clearTimeout(previewDebounceRef.current);
+    }
+    setPreviewCode(null);
+  }, []);
+
   return (
     <div
       className="flex h-full w-full overflow-hidden bg-[#292828]"
@@ -211,9 +258,10 @@ export default function ParametricView({
         </div>
       ) : (
         <PanelGroup
+          key={hasArtifact ? 'panels-with-params' : 'panels-no-params'}
           direction="horizontal"
           className="h-full w-full"
-          autoSaveId="editor-panels"
+          autoSaveId={hasArtifact ? 'editor-panels-3' : 'editor-panels-2'}
         >
           <Panel
             collapsible
@@ -283,6 +331,9 @@ export default function ParametricView({
               onOutputChange={setCurrentOutput}
               color={color}
               fixError={!limitReached ? fixError : undefined}
+              onMeshClick={handleMeshClick}
+              clickData={clickData}
+              previewCode={previewCode}
             />
           </Panel>
           {hasArtifact && (
@@ -334,12 +385,21 @@ export default function ParametricView({
                     currentOutput={currentOutput}
                     color={color}
                     setColor={setColor}
+                    onParameterLiveChange={handleParameterLiveChange}
+                    onParameterDragEnd={handleParameterDragEnd}
                   />
                 </div>
               </Panel>
             </>
           )}
         </PanelGroup>
+      )}
+      {clickData && (
+        <MiniChat
+          clickData={clickData}
+          onSubmit={handleMiniChatSubmit}
+          onClose={() => setClickData(null)}
+        />
       )}
     </div>
   );

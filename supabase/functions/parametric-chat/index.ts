@@ -16,9 +16,12 @@ import parseParameters from '../_shared/parseParameter.ts';
 import { formatUserMessage } from '../_shared/messageUtils.ts';
 import { corsHeaders } from '../_shared/cors.ts';
 
-// OpenRouter API configuration
+// LLM API configuration — per-request routing based on selected model
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const OPENROUTER_API_KEY = Deno.env.get('OPENROUTER_API_KEY') ?? '';
+const CUSTOM_LLM_URL = Deno.env.get('CUSTOM_LLM_URL') ?? '';
+const CUSTOM_LLM_API_KEY = Deno.env.get('CUSTOM_LLM_API_KEY') ?? '';
+const CUSTOM_LLM_MODEL = Deno.env.get('CUSTOM_LLM_MODEL') ?? '';
 
 // Helper to stream updated assistant message rows
 function streamMessage(
@@ -175,6 +178,9 @@ interface OpenRouterRequest {
 
 async function generateTitleFromMessages(
   messagesToSend: OpenAIMessage[],
+  llmApiUrl: string,
+  llmApiKey: string,
+  isCustomLlm: boolean,
 ): Promise<string> {
   try {
     const titleSystemPrompt = `Generate a short title for a 3D object. Rules:
@@ -184,16 +190,23 @@ async function generateTitleFromMessages(
 - No quotes or special formatting
 - Examples: "Coffee Mug", "Gear Assembly", "Phone Stand"`;
 
-    const response = await fetch(OPENROUTER_API_URL, {
+    const titleHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${llmApiKey}`,
+    };
+    if (!isCustomLlm) {
+      titleHeaders['HTTP-Referer'] = 'https://adam-cad.com';
+      titleHeaders['X-Title'] = 'Adam CAD';
+    }
+
+    const response = await fetch(llmApiUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-        'HTTP-Referer': 'https://adam-cad.com',
-        'X-Title': 'Adam CAD',
-      },
+      headers: titleHeaders,
       body: JSON.stringify({
-        model: 'anthropic/claude-3.5-haiku',
+        model:
+          isCustomLlm && CUSTOM_LLM_MODEL
+            ? CUSTOM_LLM_MODEL
+            : 'anthropic/claude-3.5-haiku',
         max_tokens: 30,
         messages: [
           { role: 'system', content: titleSystemPrompt },
@@ -207,7 +220,7 @@ async function generateTitleFromMessages(
     });
 
     if (!response.ok) {
-      throw new Error(`OpenRouter API error: ${response.statusText}`);
+      throw new Error(`LLM API error: ${response.statusText}`);
     }
 
     const data = await response.json();
@@ -277,6 +290,7 @@ Simply say what you're doing in natural language (e.g., "I'll create that for yo
 Guidelines:
 - When the user requests a new part or structural change, call build_parametric_model with their exact request in the text field.
 - When the user asks for simple parameter tweaks (like "height to 80"), call apply_parameter_changes.
+- When the user message contains click context (position/normal/distance), use edit_at_location to make a precise edit at that 3D location. The position is a world-space coordinate on the model surface, the normal indicates which face/direction was clicked, and the distance helps gauge where on the model the click occurred.
 - Keep text concise and helpful. Ask at most 1 follow-up question when truly needed.
 - Pass the user's request directly to the tool without modification (e.g., if user says "a mug", pass "a mug" to build_parametric_model).`;
 
@@ -328,6 +342,48 @@ const tools = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'edit_at_location',
+      description:
+        'Make a precise edit to the OpenSCAD model at a specific 3D location. Use when the user clicks on the model and describes an edit.',
+      parameters: {
+        type: 'object',
+        properties: {
+          text: {
+            type: 'string',
+            description: 'User edit request',
+          },
+          click_context: {
+            type: 'object',
+            properties: {
+              position: {
+                type: 'array',
+                items: { type: 'number' },
+                description: 'World-space [x, y, z] click position',
+              },
+              normal: {
+                type: 'array',
+                items: { type: 'number' },
+                description: 'Surface normal [nx, ny, nz] at click point',
+              },
+              distance_from_origin: {
+                type: 'number',
+                description: 'Distance from model origin to click point',
+              },
+            },
+            required: ['position', 'normal'],
+          },
+          baseCode: {
+            type: 'string',
+            description: 'Current OpenSCAD code to modify',
+          },
+        },
+        required: ['text', 'click_context'],
+      },
+    },
+  },
 ];
 
 // Strict prompt for producing only OpenSCAD (no suggestion requirement)
@@ -355,6 +411,22 @@ Orientation: Study the provided render images to determine the model's "up" dire
 - Look for features like: feet/base at bottom, head at top, front-facing details
 - Apply rotation to orient the model so it sits FLAT on any stand/base
 - Always include rotation parameters so the user can fine-tune
+
+## Dropdown Parameters
+For parameters where users should pick from a fixed set of options, add a comment with the options list:
+shape = 1; // [1:Cube, 2:Sphere, 3:Cylinder]
+quality = "medium"; // [low:Low Quality, medium:Medium Quality, high:High Quality]
+The format is: // [value1:Label1, value2:Label2, ...]
+This renders as a dropdown select in the UI instead of a slider or text input.
+
+## Location-Aware Editing
+When given click context (position, normal, distance), use those coordinates to place or modify geometry at the exact location:
+- **position** = the [x, y, z] point on the model surface the user clicked
+- **normal** = the surface direction [nx, ny, nz] at that point (useful for orienting holes, extrusions, etc.)
+- **distance_from_origin** = how far from center the click was
+- Use translate() to place new geometry at the clicked position
+- Use the normal to orient features (e.g., a hole drilled along the normal direction)
+- Modify existing code rather than rewriting from scratch when possible
 
 **Examples:**
 
@@ -474,6 +546,11 @@ Deno.serve(async (req) => {
     newMessageId: string;
     thinking?: boolean;
   } = await req.json();
+
+  // Per-request routing: custom LLM when model is 'custom', OpenRouter otherwise
+  const isCustomLlm = model === 'custom' && !!CUSTOM_LLM_URL;
+  const llmApiUrl = isCustomLlm ? CUSTOM_LLM_URL : OPENROUTER_API_URL;
+  const llmApiKey = isCustomLlm ? CUSTOM_LLM_API_KEY : OPENROUTER_API_KEY;
 
   const { data: messages, error: messagesError } = await supabaseClient
     .from('messages')
@@ -617,22 +694,37 @@ Deno.serve(async (req) => {
       requestBody.max_tokens = 20000;
     }
 
-    const response = await fetch(OPENROUTER_API_URL, {
+    // Build headers — only include OpenRouter-specific headers when using OpenRouter
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${llmApiKey}`,
+    };
+    if (!isCustomLlm) {
+      headers['HTTP-Referer'] = 'https://adam-cad.com';
+      headers['X-Title'] = 'Adam CAD';
+    }
+
+    // Override model if using custom LLM
+    if (isCustomLlm && CUSTOM_LLM_MODEL) {
+      requestBody.model = CUSTOM_LLM_MODEL;
+    }
+
+    // Skip reasoning param for custom LLMs (likely unsupported)
+    if (isCustomLlm) {
+      delete requestBody.reasoning;
+    }
+
+    const response = await fetch(llmApiUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-        'HTTP-Referer': 'https://adam-cad.com',
-        'X-Title': 'Adam CAD',
-      },
+      headers,
       body: JSON.stringify(requestBody),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(`OpenRouter API Error: ${response.status} - ${errorText}`);
+      console.error(`LLM API Error: ${response.status} - ${errorText}`);
       throw new Error(
-        `OpenRouter API error: ${response.statusText} (${response.status})`,
+        `LLM API error: ${response.statusText} (${response.status})`,
       );
     }
 
@@ -788,7 +880,12 @@ Deno.serve(async (req) => {
               );
 
               // Generate a title from the messages
-              const title = await generateTitleFromMessages(messagesToSend);
+              const title = await generateTitleFromMessages(
+                messagesToSend,
+                llmApiUrl,
+                llmApiKey,
+                isCustomLlm,
+              );
 
               // Remove the code from the text (keep any non-code explanation)
               let cleanedText = content.text;
@@ -916,22 +1013,30 @@ Deno.serve(async (req) => {
             };
 
             // Also apply thinking to code generation if enabled
-            if (thinking) {
+            if (thinking && !isCustomLlm) {
               codeRequestBody.reasoning = {
                 max_tokens: 12000,
               };
               codeRequestBody.max_tokens = 20000;
             }
 
+            if (isCustomLlm && CUSTOM_LLM_MODEL) {
+              codeRequestBody.model = CUSTOM_LLM_MODEL;
+            }
+
+            const codeHeaders: Record<string, string> = {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${llmApiKey}`,
+            };
+            if (!isCustomLlm) {
+              codeHeaders['HTTP-Referer'] = 'https://adam-cad.com';
+              codeHeaders['X-Title'] = 'Adam CAD';
+            }
+
             const [codeResult, titleResult] = await Promise.allSettled([
-              fetch(OPENROUTER_API_URL, {
+              fetch(llmApiUrl, {
                 method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-                  'HTTP-Referer': 'https://adam-cad.com',
-                  'X-Title': 'Adam CAD',
-                },
+                headers: codeHeaders,
                 body: JSON.stringify(codeRequestBody),
               }).then(async (r) => {
                 if (!r.ok) {
@@ -940,7 +1045,12 @@ Deno.serve(async (req) => {
                 }
                 return r.json();
               }),
-              generateTitleFromMessages(messagesToSend),
+              generateTitleFromMessages(
+                messagesToSend,
+                llmApiUrl,
+                llmApiKey,
+                isCustomLlm,
+              ),
             ]);
 
             let code = '';
@@ -1062,6 +1172,168 @@ Deno.serve(async (req) => {
               ),
               artifact,
             };
+            streamMessage(controller, { ...newMessageData, content });
+          } else if (toolCall.name === 'edit_at_location') {
+            // Deduct parametric tokens for location-based editing
+            const { data: rawParamTokenResult } = await serviceClient.rpc(
+              'deduct_tokens',
+              {
+                p_user_id: userData.user!.id,
+                p_operation: 'parametric',
+                p_reference_id: toolCall.id,
+              },
+            );
+
+            const paramTokenResult = rawParamTokenResult as {
+              success: boolean;
+            } | null;
+
+            if (!paramTokenResult?.success) {
+              content = {
+                ...content,
+                error: 'insufficient_tokens',
+              };
+              streamMessage(controller, { ...newMessageData, content });
+              return;
+            }
+
+            let toolInput: {
+              text?: string;
+              click_context?: {
+                position?: number[];
+                normal?: number[];
+                distance_from_origin?: number;
+              };
+              baseCode?: string;
+            } = {};
+            try {
+              toolInput = JSON.parse(toolCall.arguments);
+            } catch (e) {
+              console.error('Invalid tool input JSON', e);
+              content = markToolAsError(content, toolCall.id);
+              streamMessage(controller, { ...newMessageData, content });
+              return;
+            }
+
+            // Resolve base code from tool input or existing artifact/history
+            let baseCode = toolInput.baseCode || content.artifact?.code;
+            if (!baseCode) {
+              const lastArtifactMsg = [...messages]
+                .reverse()
+                .find(
+                  (m) => m.role === 'assistant' && m.content.artifact?.code,
+                );
+              baseCode = lastArtifactMsg?.content.artifact?.code;
+            }
+
+            // Build location-aware prompt
+            const clickCtx = toolInput.click_context;
+            const locationPrompt = clickCtx
+              ? `\n\nThe user clicked on the model at position [${clickCtx.position?.join(', ')}] with surface normal [${clickCtx.normal?.join(', ')}]${clickCtx.distance_from_origin != null ? `, distance from origin: ${clickCtx.distance_from_origin}` : ''}. Use these coordinates to place or modify geometry at that exact location.`
+              : '';
+
+            const baseContext: OpenAIMessage[] = baseCode
+              ? [{ role: 'assistant' as const, content: baseCode }]
+              : [];
+
+            const userText = toolInput.text || newMessage?.content.text || '';
+            const codeMessages: OpenAIMessage[] = [
+              ...messagesToSend,
+              ...baseContext,
+              {
+                role: 'user' as const,
+                content: userText + locationPrompt,
+              },
+            ];
+
+            const codeRequestBody: OpenRouterRequest = {
+              model,
+              messages: [
+                { role: 'system', content: STRICT_CODE_PROMPT },
+                ...codeMessages,
+              ],
+              max_tokens: 16000,
+            };
+
+            if (thinking && !isCustomLlm) {
+              codeRequestBody.reasoning = { max_tokens: 12000 };
+              codeRequestBody.max_tokens = 20000;
+            }
+
+            if (isCustomLlm && CUSTOM_LLM_MODEL) {
+              codeRequestBody.model = CUSTOM_LLM_MODEL;
+            }
+
+            const codeHeaders2: Record<string, string> = {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${llmApiKey}`,
+            };
+            if (!isCustomLlm) {
+              codeHeaders2['HTTP-Referer'] = 'https://adam-cad.com';
+              codeHeaders2['X-Title'] = 'Adam CAD';
+            }
+
+            const [codeResult, titleResult] = await Promise.allSettled([
+              fetch(llmApiUrl, {
+                method: 'POST',
+                headers: codeHeaders2,
+                body: JSON.stringify(codeRequestBody),
+              }).then(async (r) => {
+                if (!r.ok) {
+                  const t = await r.text();
+                  throw new Error(`Code gen error: ${r.status} - ${t}`);
+                }
+                return r.json();
+              }),
+              generateTitleFromMessages(
+                messagesToSend,
+                llmApiUrl,
+                llmApiKey,
+                isCustomLlm,
+              ),
+            ]);
+
+            let code = '';
+            if (
+              codeResult.status === 'fulfilled' &&
+              codeResult.value.choices?.[0]?.message?.content
+            ) {
+              code = codeResult.value.choices[0].message.content.trim();
+            } else if (codeResult.status === 'rejected') {
+              console.error('Code generation failed:', codeResult.reason);
+            }
+
+            const codeBlockRegex = /^```(?:openscad)?\n?([\s\S]*?)\n?```$/;
+            const match = code.match(codeBlockRegex);
+            if (match) {
+              code = match[1].trim();
+            }
+
+            let title =
+              titleResult.status === 'fulfilled'
+                ? titleResult.value
+                : content.artifact?.title || 'Adam Object';
+            const lower = title.toLowerCase();
+            if (lower.includes('sorry') || lower.includes('apologize'))
+              title = content.artifact?.title || 'Adam Object';
+
+            if (!code) {
+              content = markToolAsError(content, toolCall.id);
+            } else {
+              const artifact: ParametricArtifact = {
+                title,
+                version: 'v1',
+                code,
+                parameters: parseParameters(code),
+              };
+              content = {
+                ...content,
+                toolCalls: (content.toolCalls || []).filter(
+                  (c) => c.id !== toolCall.id,
+                ),
+                artifact,
+              };
+            }
             streamMessage(controller, { ...newMessageData, content });
           }
         }
