@@ -730,11 +730,11 @@ Deno.serve(async (req) => {
 
     const responseStream = new ReadableStream({
       async start(controller) {
-        let currentToolCall: {
-          id: string;
-          name: string;
-          arguments: string;
-        } | null = null;
+        const toolCallMap = new Map<
+          number,
+          { id: string; name: string; arguments: string }
+        >();
+        let toolCallHandled = false;
 
         // Utility to mark all pending tools as error when finalizing on failure/cancel
         const markAllToolsError = () => {
@@ -759,6 +759,7 @@ Deno.serve(async (req) => {
           }
 
           while (true) {
+            if (toolCallHandled) break;
             const { done, value } = await reader.read();
             if (done) break;
 
@@ -803,26 +804,41 @@ Deno.serve(async (req) => {
                     // Usually we don't show internal reasoning in the final message unless explicitly requested.
                   }
 
-                  // Handle tool calls
-                  if (delta.tool_calls) {
+                  // Handle tool calls — only accept the first tool call;
+                  // some models (e.g. Gemma) generate many duplicate parallel
+                  // tool calls, so we cap at 1.
+                  if (delta.tool_calls && !toolCallHandled) {
                     for (const toolCall of delta.tool_calls) {
-                      const _index = toolCall.index || 0;
+                      const index = toolCall.index ?? 0;
 
-                      // Start of new tool call
-                      if (toolCall.id) {
-                        currentToolCall = {
-                          id: toolCall.id,
+                      if (!toolCallMap.has(index)) {
+                        if (toolCallMap.size > 0) {
+                          // A second tool call started — the first one's args
+                          // are complete. Process it now and stop reading.
+                          for (const [, tc] of toolCallMap) {
+                            await handleToolCall(tc);
+                          }
+                          toolCallMap.clear();
+                          toolCallHandled = true;
+                          break;
+                        }
+
+                        // First delta for this index — register new tool call
+                        const newCall = {
+                          id: toolCall.id || `tool_${index}`,
                           name: toolCall.function?.name || '',
                           arguments: '',
                         };
+                        toolCallMap.set(index, newCall);
+
                         content = {
                           ...content,
                           toolCalls: [
                             ...(content.toolCalls || []),
                             {
-                              name: currentToolCall.name,
-                              id: currentToolCall.id,
-                              status: 'pending',
+                              name: newCall.name,
+                              id: newCall.id,
+                              status: 'pending' as const,
                             },
                           ],
                         };
@@ -832,21 +848,28 @@ Deno.serve(async (req) => {
                         });
                       }
 
-                      // Accumulate arguments
-                      if (toolCall.function?.arguments && currentToolCall) {
-                        currentToolCall.arguments +=
-                          toolCall.function.arguments;
+                      // Accumulate arguments only for the tracked tool call
+                      if (toolCall.function?.arguments) {
+                        const tracked = toolCallMap.get(index);
+                        if (tracked) {
+                          tracked.arguments += toolCall.function.arguments;
+                        }
                       }
                     }
                   }
 
                   // Check if tool call is complete (when we get finish_reason)
+                  const finishReason = chunk.choices?.[0]?.finish_reason;
                   if (
-                    chunk.choices?.[0]?.finish_reason === 'tool_calls' &&
-                    currentToolCall
+                    finishReason &&
+                    toolCallMap.size > 0 &&
+                    !toolCallHandled
                   ) {
-                    await handleToolCall(currentToolCall);
-                    currentToolCall = null;
+                    for (const [, tc] of toolCallMap) {
+                      await handleToolCall(tc);
+                    }
+                    toolCallMap.clear();
+                    toolCallHandled = true;
                   }
                 } catch (e) {
                   console.error('Error parsing SSE chunk:', e);
@@ -855,9 +878,12 @@ Deno.serve(async (req) => {
             }
           }
 
-          // Handle any remaining tool call
-          if (currentToolCall) {
-            await handleToolCall(currentToolCall);
+          // Handle any remaining tool calls
+          if (toolCallMap.size > 0) {
+            for (const [, tc] of toolCallMap) {
+              await handleToolCall(tc);
+            }
+            toolCallMap.clear();
           }
         } catch (error) {
           console.error(error);
