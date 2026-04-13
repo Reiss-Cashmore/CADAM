@@ -1,6 +1,7 @@
 import { useConversation } from '@/contexts/ConversationContext';
 import { supabase } from '@/lib/supabase';
 import { Content, Conversation, Message, Model } from '@shared/types';
+import { PARAMETRIC_MODELS } from '@/lib/utils';
 import { HistoryConversation } from '../types/misc.ts';
 import {
   QueryClient,
@@ -641,7 +642,7 @@ export function useSendContentMutation({
         });
       } else {
         await sendToParametricChat({
-          model: content.model ?? conversation.settings?.model ?? 'fast',
+          model: content.model ?? conversation.settings?.model ?? PARAMETRIC_MODELS[0].id,
           messageId: userMessage.id,
           conversationId: conversation.id,
         });
@@ -740,7 +741,7 @@ export function useEditMessageMutation({
         });
       } else {
         sendToParametricChat({
-          model: conversation.settings?.model ?? 'fast',
+          model: conversation.settings?.model ?? PARAMETRIC_MODELS[0].id,
           messageId: userMessage.id,
           conversationId: conversation.id,
         });

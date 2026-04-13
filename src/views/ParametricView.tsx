@@ -258,10 +258,10 @@ export default function ParametricView({
         </div>
       ) : (
         <PanelGroup
-          key={hasArtifact ? 'panels-with-params' : 'panels-no-params'}
+          key="editor-panels"
           direction="horizontal"
           className="h-full w-full"
-          autoSaveId={hasArtifact ? 'editor-panels-3' : 'editor-panels-2'}
+          autoSaveId="editor-panels"
         >
           <Panel
             collapsible

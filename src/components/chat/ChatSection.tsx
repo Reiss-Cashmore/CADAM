@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Content, Message, Model } from '@shared/types';
+import { PARAMETRIC_MODELS } from '@/lib/utils';
 import TextAreaChat from '@/components/TextAreaChat';
 import { SuggestionPills } from '@/components/chat/SuggestionPills';
 import { useIsMobile } from '@/hooks/useIsMobile';
@@ -80,7 +81,7 @@ export function ChatSection({
 
   const model =
     conversation.settings?.model ??
-    (conversation.type === 'parametric' ? 'fast' : 'quality');
+    (conversation.type === 'parametric' ? PARAMETRIC_MODELS[0].id : 'quality');
 
   const lowPrompts = useMemo(() => {
     return totalTokens > 0 && totalTokens <= 10;

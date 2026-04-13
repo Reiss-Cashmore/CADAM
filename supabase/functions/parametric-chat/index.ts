@@ -22,6 +22,68 @@ const OPENROUTER_API_KEY = Deno.env.get('OPENROUTER_API_KEY') ?? '';
 const CUSTOM_LLM_URL = Deno.env.get('CUSTOM_LLM_URL') ?? '';
 const CUSTOM_LLM_API_KEY = Deno.env.get('CUSTOM_LLM_API_KEY') ?? '';
 const CUSTOM_LLM_MODEL = Deno.env.get('CUSTOM_LLM_MODEL') ?? '';
+// LM Studio native endpoint for MCP-enabled code gen (derived from OpenAI-compat URL)
+const CUSTOM_LLM_NATIVE_URL = CUSTOM_LLM_URL
+  ? CUSTOM_LLM_URL.replace('/v1/chat/completions', '/api/v1/chat')
+  : '';
+
+// MCP integrations for custom LLMs (e.g. LM Studio with Context7 for docs)
+const CUSTOM_LLM_INTEGRATIONS = ['mcp/context7'];
+
+/**
+ * Parse LM Studio native /api/v1/chat response format.
+ * Extracts message content from the output[] array and logs any MCP tool calls.
+ */
+function parseLMStudioNativeResponse(json: {
+  output?: Array<{ type: string; content?: string; tool?: string; arguments?: unknown; output?: string; provider_info?: unknown }>;
+  choices?: Array<{ message?: { content?: string } }>;
+}): string {
+  if (json.output) {
+    const toolCalls = json.output.filter((o) => o.type === 'tool_call');
+    if (toolCalls.length) {
+      console.log(
+        `[code-gen] MCP tool calls:`,
+        JSON.stringify(toolCalls.map((tc) => ({ tool: tc.tool, provider: tc.provider_info }))),
+      );
+    }
+    return json.output
+      .filter((o) => o.type === 'message')
+      .map((m) => m.content || '')
+      .join('');
+  }
+  // Fallback to OpenAI format
+  return json.choices?.[0]?.message?.content || '';
+}
+
+/**
+ * Convert OpenAI messages array to LM Studio native input format.
+ * Separates system prompt from conversation messages.
+ */
+function buildLMStudioNativeRequest(
+  systemPrompt: string,
+  messages: OpenAIMessage[],
+  modelName: string,
+  maxTokens: number,
+): Record<string, unknown> {
+  // Concatenate non-system messages into input text
+  const inputParts = messages.map((m) => {
+    const content = typeof m.content === 'string'
+      ? m.content
+      : Array.isArray(m.content)
+        ? m.content.map((c: { type: string; text?: string }) => c.type === 'text' ? c.text || '' : '').join('')
+        : '';
+    return `${m.role}: ${content}`;
+  });
+
+  return {
+    model: modelName,
+    system_prompt: systemPrompt,
+    input: inputParts.join('\n\n'),
+    max_output_tokens: maxTokens,
+    context_length: 16000,
+    integrations: CUSTOM_LLM_INTEGRATIONS,
+  };
+}
 
 // Helper to stream updated assistant message rows
 function streamMessage(
@@ -174,6 +236,8 @@ interface OpenRouterRequest {
     max_tokens?: number;
     effort?: 'high' | 'medium' | 'low';
   };
+  // LM Studio MCP integrations (for custom LLMs with MCP tool access)
+  integrations?: unknown[];
 }
 
 async function generateTitleFromMessages(
@@ -399,6 +463,7 @@ CRITICAL: Never include in code comments or anywhere:
 Just generate clean OpenSCAD code with appropriate technical comments.
 - Return ONLY raw OpenSCAD code. DO NOT wrap it in markdown code blocks (no \`\`\`openscad). 
 Just return the plain OpenSCAD code directly.
+- Use context7 to retrieve Openscad documentation documentation.
 
 # STL Import (CRITICAL)
 When the user uploads a 3D model (STL file) and you are told to use import():
@@ -552,6 +617,7 @@ Deno.serve(async (req) => {
   const isCustomLlm =
     (model === 'custom' || model.startsWith('custom/')) && !!CUSTOM_LLM_URL;
   const llmApiUrl = isCustomLlm ? CUSTOM_LLM_URL : OPENROUTER_API_URL;
+  console.log(`[parametric-chat] model=${model} isCustomLlm=${isCustomLlm} url=${llmApiUrl}`);
   const llmApiKey = isCustomLlm ? CUSTOM_LLM_API_KEY : OPENROUTER_API_KEY;
   // Extract the actual model name for custom models (e.g. "custom/unsloth/qwen3" → "unsloth/qwen3")
   const customModelName = model.startsWith('custom/')
@@ -1035,27 +1101,26 @@ Deno.serve(async (req) => {
               ...finalUserMessage,
             ];
 
-            // Code generation request logic
-            const codeRequestBody: OpenRouterRequest = {
-              model,
-              messages: [
-                { role: 'system', content: STRICT_CODE_PROMPT },
-                ...codeMessages,
-              ],
-              max_tokens: 16000,
-            };
-
-            // Also apply thinking to code generation if enabled
-            if (thinking && !isCustomLlm) {
-              codeRequestBody.reasoning = {
-                max_tokens: 12000,
-              };
-              codeRequestBody.max_tokens = 20000;
-            }
-
-            if (isCustomLlm && customModelName) {
-              codeRequestBody.model = customModelName;
-            }
+            // Code generation: use LM Studio native endpoint for custom LLMs (MCP support),
+            // OpenRouter/OpenAI-compat for cloud models
+            const codeGenUrl = isCustomLlm ? CUSTOM_LLM_NATIVE_URL : llmApiUrl;
+            const codeGenBody = isCustomLlm && customModelName
+              ? buildLMStudioNativeRequest(STRICT_CODE_PROMPT, codeMessages, customModelName, 16000)
+              : (() => {
+                  const body: OpenRouterRequest = {
+                    model,
+                    messages: [
+                      { role: 'system', content: STRICT_CODE_PROMPT },
+                      ...codeMessages,
+                    ],
+                    max_tokens: 16000,
+                  };
+                  if (thinking) {
+                    body.reasoning = { max_tokens: 12000 };
+                    body.max_tokens = 20000;
+                  }
+                  return body;
+                })();
 
             const codeHeaders: Record<string, string> = {
               'Content-Type': 'application/json',
@@ -1066,11 +1131,15 @@ Deno.serve(async (req) => {
               codeHeaders['X-Title'] = 'Adam CAD';
             }
 
+            if (isCustomLlm) {
+              console.log(`[code-gen] Using LM Studio native endpoint: ${codeGenUrl}`);
+            }
+
             const [codeResult, titleResult] = await Promise.allSettled([
-              fetch(llmApiUrl, {
+              fetch(codeGenUrl, {
                 method: 'POST',
                 headers: codeHeaders,
-                body: JSON.stringify(codeRequestBody),
+                body: JSON.stringify(codeGenBody),
               }).then(async (r) => {
                 if (!r.ok) {
                   const t = await r.text();
@@ -1088,11 +1157,10 @@ Deno.serve(async (req) => {
             ]);
 
             let code = '';
-            if (
-              codeResult.status === 'fulfilled' &&
-              codeResult.value.choices?.[0]?.message?.content
-            ) {
-              code = codeResult.value.choices[0].message.content.trim();
+            if (codeResult.status === 'fulfilled') {
+              code = isCustomLlm
+                ? parseLMStudioNativeResponse(codeResult.value).trim()
+                : (codeResult.value.choices?.[0]?.message?.content || '').trim();
             } else if (codeResult.status === 'rejected') {
               console.error('Code generation failed:', codeResult.reason);
             }
@@ -1280,23 +1348,25 @@ Deno.serve(async (req) => {
               },
             ];
 
-            const codeRequestBody: OpenRouterRequest = {
-              model,
-              messages: [
-                { role: 'system', content: STRICT_CODE_PROMPT },
-                ...codeMessages,
-              ],
-              max_tokens: 16000,
-            };
-
-            if (thinking && !isCustomLlm) {
-              codeRequestBody.reasoning = { max_tokens: 12000 };
-              codeRequestBody.max_tokens = 20000;
-            }
-
-            if (isCustomLlm && customModelName) {
-              codeRequestBody.model = customModelName;
-            }
+            // Code generation: use LM Studio native endpoint for custom LLMs (MCP support)
+            const codeGenUrl2 = isCustomLlm ? CUSTOM_LLM_NATIVE_URL : llmApiUrl;
+            const codeGenBody2 = isCustomLlm && customModelName
+              ? buildLMStudioNativeRequest(STRICT_CODE_PROMPT, codeMessages, customModelName, 16000)
+              : (() => {
+                  const body: OpenRouterRequest = {
+                    model,
+                    messages: [
+                      { role: 'system', content: STRICT_CODE_PROMPT },
+                      ...codeMessages,
+                    ],
+                    max_tokens: 16000,
+                  };
+                  if (thinking) {
+                    body.reasoning = { max_tokens: 12000 };
+                    body.max_tokens = 20000;
+                  }
+                  return body;
+                })();
 
             const codeHeaders2: Record<string, string> = {
               'Content-Type': 'application/json',
@@ -1308,10 +1378,10 @@ Deno.serve(async (req) => {
             }
 
             const [codeResult, titleResult] = await Promise.allSettled([
-              fetch(llmApiUrl, {
+              fetch(codeGenUrl2, {
                 method: 'POST',
                 headers: codeHeaders2,
-                body: JSON.stringify(codeRequestBody),
+                body: JSON.stringify(codeGenBody2),
               }).then(async (r) => {
                 if (!r.ok) {
                   const t = await r.text();
@@ -1329,11 +1399,10 @@ Deno.serve(async (req) => {
             ]);
 
             let code = '';
-            if (
-              codeResult.status === 'fulfilled' &&
-              codeResult.value.choices?.[0]?.message?.content
-            ) {
-              code = codeResult.value.choices[0].message.content.trim();
+            if (codeResult.status === 'fulfilled') {
+              code = isCustomLlm
+                ? parseLMStudioNativeResponse(codeResult.value).trim()
+                : (codeResult.value.choices?.[0]?.message?.content || '').trim();
             } else if (codeResult.status === 'rejected') {
               console.error('Code generation failed:', codeResult.reason);
             }
