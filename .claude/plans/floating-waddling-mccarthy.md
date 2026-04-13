@@ -1,140 +1,41 @@
-# Plan: Fix Ghost Preview for Both Growth and Shrink
+# Plan: Increase Timeouts for Slow Local Models
 
 ## Context
 
-The two-bit stencil approach (using `stencilWriteMask` to write separate stencil bits) causes the entire model to be highlighted during slider drag, and shrink regions show no highlight at all. Root cause: the ghost stencil writer's Replace op **overwrites** the solid's stencil value at overlap pixels (stencil becomes 2 instead of 3), so the growth highlight renders everywhere the ghost exists (including overlap with solid).
+Local custom LLM models (Qwen3, GPT-OSS 120B, Nemotron) are slower than cloud APIs and hit the default Supabase Edge Runtime wall clock timeout before they can respond. The LLM `fetch()` calls in the edge function have no explicit timeout, so the limit comes from the Supabase edge runtime itself.
 
-## Approach: Single-value stencil with ordered Replace + depth filtering
+## Where the Timeouts Are
 
-Drop `stencilWriteMask` and `stencilFuncMask`. Use plain Replace with different ref values. Rely on **render order** to determine which value "wins" at overlap pixels, then use **polygon offset + depth test** to filter out the growth highlight at overlap.
+1. **Supabase Edge Runtime wall clock** — default 150s for local dev. Set per-function in `supabase/config.toml` via undocumented `wall_clock_timeout` or by passing `--request-idle-timeout` to `supabase functions serve`.
 
-### Stencil values after rendering passes 1 + 2
+2. **No fetch timeout in `parametric-chat/index.ts`** — the streaming `fetch()` to OpenRouter/custom LLM (line ~700) and the code generation `fetch()` calls (lines ~1060, ~1310) have no `AbortController` or timeout. They run until the edge runtime kills them.
 
-| Region       | Solid writes         | Ghost writes | Final stencil |
-| ------------ | -------------------- | ------------ | ------------- |
-| Neither      | —                    | —            | 0             |
-| Solid only   | 1                    | —            | **1**         |
-| Ghost only   | —                    | 2            | **2**         |
-| Both overlap | 1 → overwritten by 2 | 2            | **2**         |
+3. **No client-side timeout** — `src/services/messageService.ts` calls `supabase.functions.invoke()` with no timeout. The Supabase JS client uses browser `fetch()` which has no default timeout.
 
-### How each highlight filters correctly
+## Fix
 
-- **Growth** (test Equal 2): Passes at ghost-only AND overlap. But at overlap, polygon offset pushes ghost behind solid → **depth test fails** → only ghost-only pixels render.
-- **Shrink** (test Equal 1): Passes only at solid-only pixels (never overwritten). No depth ambiguity.
-- **Identical geometry** (no change): Everything is overlap (stencil=2). Growth fails depth test. Shrink fails stencil test. **No highlight.**
+### `supabase/config.toml` — increase edge function timeout
 
-## Changes — `src/components/viewer/ThreeScene.tsx` only
+Add `wall_clock_timeout_sec` to the parametric-chat function config:
 
-### 1. Main solid mesh (renderOrder=1)
-
-Remove `stencilWriteMask`. Use simple Replace with ref=1.
-
-```tsx
-<mesh
-  geometry={geometry}
-  rotation={[-Math.PI / 2, 0, 0]}
-  position={[0, 0, 0]}
-  onClick={handleMeshClick}
-  renderOrder={1}
->
-  <meshStandardMaterial
-    color={color}
-    metalness={0.6}
-    roughness={0.3}
-    envMapIntensity={0.3}
-    stencilWrite={true}
-    stencilRef={1}
-    stencilFunc={THREE.AlwaysStencilFunc}
-    stencilZFail={THREE.ReplaceStencilOp}
-    stencilZPass={THREE.ReplaceStencilOp}
-  />
-</mesh>
+```toml
+[functions.parametric-chat]
+enabled = true
+verify_jwt = true
+wall_clock_timeout_sec = 600
 ```
 
-### 2. Ghost stencil writer (renderOrder=2, invisible)
+This gives 10 minutes for slow local models. Only affects `parametric-chat` — other functions keep the default.
 
-Remove `stencilWriteMask`. Replace with ref=2, overwrites solid's 1 at overlap.
+If `wall_clock_timeout_sec` isn't supported in this CLI version, the alternative is the `--request-idle-timeout` flag when serving:
 
-```tsx
-<mesh
-  geometry={previewGeometry}
-  rotation={[-Math.PI / 2, 0, 0]}
-  position={[0, 0, 0]}
-  renderOrder={2}
->
-  <meshStandardMaterial
-    colorWrite={false}
-    depthTest={false}
-    depthWrite={false}
-    stencilWrite={true}
-    stencilRef={2}
-    stencilFunc={THREE.AlwaysStencilFunc}
-    stencilZPass={THREE.ReplaceStencilOp}
-  />
-</mesh>
+```bash
+npx supabase functions serve --no-verify-jwt --request-idle-timeout 600 --env-file supabase/functions/.env
 ```
 
-### 3. Growth highlight (renderOrder=3)
+### Verification
 
-Remove `stencilFuncMask`. Test Equal 2. Polygon offset pushes behind solid to filter overlap.
-
-```tsx
-<mesh
-  geometry={previewGeometry}
-  rotation={[-Math.PI / 2, 0, 0]}
-  position={[0, 0, 0]}
-  renderOrder={3}
->
-  <meshStandardMaterial
-    color="#00e5ff"
-    emissive="#00e5ff"
-    emissiveIntensity={0.6}
-    transparent
-    opacity={0.35}
-    depthWrite={false}
-    polygonOffset
-    polygonOffsetFactor={4}
-    polygonOffsetUnits={4}
-    stencilWrite={false}
-    stencilRef={2}
-    stencilFunc={THREE.EqualStencilFunc}
-  />
-</mesh>
-```
-
-### 4. Shrink highlight (renderOrder=4)
-
-Remove `stencilFuncMask`. Test Equal 1. Negative polygon offset pulls in front of solid.
-
-```tsx
-<mesh
-  geometry={geometry}
-  rotation={[-Math.PI / 2, 0, 0]}
-  position={[0, 0, 0]}
-  renderOrder={4}
->
-  <meshStandardMaterial
-    color="#00e5ff"
-    emissive="#00e5ff"
-    emissiveIntensity={0.6}
-    transparent
-    opacity={0.35}
-    depthWrite={false}
-    polygonOffset
-    polygonOffsetFactor={-2}
-    polygonOffsetUnits={-2}
-    stencilWrite={false}
-    stencilRef={1}
-    stencilFunc={THREE.EqualStencilFunc}
-  />
-</mesh>
-```
-
-## Verification
-
-1. Drag slider to **increase** a parameter → only extending edges glow cyan, unchanged parts look normal
-2. Drag slider to **decrease** a parameter → edges being removed glow cyan
-3. **Click** slider without dragging → no highlight appears
-4. Rotate model while dragging → highlights update correctly from all angles
-5. Release slider → ghost disappears, model updates normally
-6. No z-fighting artifacts at any angle
+1. Select a slow local model (Nemotron 120B)
+2. Send a parametric chat message
+3. Wait for full response — should not timeout at ~150s
+4. Confirm fast cloud models (Gemini, Claude) still work normally

@@ -274,7 +274,29 @@ export const PARAMETRIC_MODELS: ModelConfig[] = [
   },
 ];
 
-if (import.meta.env.VITE_CUSTOM_LLM_NAME) {
+// Support multiple custom models via JSON: VITE_CUSTOM_LLMS='[{"id":"model-id","name":"Display Name"}]'
+// Or single model via legacy VITE_CUSTOM_LLM_NAME
+if (import.meta.env.VITE_CUSTOM_LLMS) {
+  try {
+    const customModels = JSON.parse(import.meta.env.VITE_CUSTOM_LLMS) as Array<{
+      id: string;
+      name: string;
+    }>;
+    for (const m of customModels) {
+      PARAMETRIC_MODELS.push({
+        id: `custom/${m.id}`,
+        name: m.name,
+        description: 'Custom locally-hosted model',
+        provider: 'Custom',
+        supportsTools: true,
+        supportsThinking: false,
+        supportsVision: false,
+      });
+    }
+  } catch {
+    console.error('Failed to parse VITE_CUSTOM_LLMS');
+  }
+} else if (import.meta.env.VITE_CUSTOM_LLM_NAME) {
   PARAMETRIC_MODELS.push({
     id: 'custom',
     name: import.meta.env.VITE_CUSTOM_LLM_NAME,

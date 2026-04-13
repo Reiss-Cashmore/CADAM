@@ -181,6 +181,7 @@ async function generateTitleFromMessages(
   llmApiUrl: string,
   llmApiKey: string,
   isCustomLlm: boolean,
+  customModelName?: string,
 ): Promise<string> {
   try {
     const titleSystemPrompt = `Generate a short title for a 3D object. Rules:
@@ -204,8 +205,8 @@ async function generateTitleFromMessages(
       headers: titleHeaders,
       body: JSON.stringify({
         model:
-          isCustomLlm && CUSTOM_LLM_MODEL
-            ? CUSTOM_LLM_MODEL
+          isCustomLlm && customModelName
+            ? customModelName
             : 'anthropic/claude-3.5-haiku',
         max_tokens: 30,
         messages: [
@@ -547,10 +548,15 @@ Deno.serve(async (req) => {
     thinking?: boolean;
   } = await req.json();
 
-  // Per-request routing: custom LLM when model is 'custom', OpenRouter otherwise
-  const isCustomLlm = model === 'custom' && !!CUSTOM_LLM_URL;
+  // Per-request routing: custom LLM when model starts with 'custom', OpenRouter otherwise
+  const isCustomLlm =
+    (model === 'custom' || model.startsWith('custom/')) && !!CUSTOM_LLM_URL;
   const llmApiUrl = isCustomLlm ? CUSTOM_LLM_URL : OPENROUTER_API_URL;
   const llmApiKey = isCustomLlm ? CUSTOM_LLM_API_KEY : OPENROUTER_API_KEY;
+  // Extract the actual model name for custom models (e.g. "custom/unsloth/qwen3" → "unsloth/qwen3")
+  const customModelName = model.startsWith('custom/')
+    ? model.slice('custom/'.length)
+    : CUSTOM_LLM_MODEL;
 
   const { data: messages, error: messagesError } = await supabaseClient
     .from('messages')
@@ -705,8 +711,8 @@ Deno.serve(async (req) => {
     }
 
     // Override model if using custom LLM
-    if (isCustomLlm && CUSTOM_LLM_MODEL) {
-      requestBody.model = CUSTOM_LLM_MODEL;
+    if (isCustomLlm && customModelName) {
+      requestBody.model = customModelName;
     }
 
     // Skip reasoning param for custom LLMs (likely unsupported)
@@ -911,6 +917,7 @@ Deno.serve(async (req) => {
                 llmApiUrl,
                 llmApiKey,
                 isCustomLlm,
+                customModelName,
               );
 
               // Remove the code from the text (keep any non-code explanation)
@@ -1046,8 +1053,8 @@ Deno.serve(async (req) => {
               codeRequestBody.max_tokens = 20000;
             }
 
-            if (isCustomLlm && CUSTOM_LLM_MODEL) {
-              codeRequestBody.model = CUSTOM_LLM_MODEL;
+            if (isCustomLlm && customModelName) {
+              codeRequestBody.model = customModelName;
             }
 
             const codeHeaders: Record<string, string> = {
@@ -1076,6 +1083,7 @@ Deno.serve(async (req) => {
                 llmApiUrl,
                 llmApiKey,
                 isCustomLlm,
+                customModelName,
               ),
             ]);
 
@@ -1286,8 +1294,8 @@ Deno.serve(async (req) => {
               codeRequestBody.max_tokens = 20000;
             }
 
-            if (isCustomLlm && CUSTOM_LLM_MODEL) {
-              codeRequestBody.model = CUSTOM_LLM_MODEL;
+            if (isCustomLlm && customModelName) {
+              codeRequestBody.model = customModelName;
             }
 
             const codeHeaders2: Record<string, string> = {
@@ -1316,6 +1324,7 @@ Deno.serve(async (req) => {
                 llmApiUrl,
                 llmApiKey,
                 isCustomLlm,
+                customModelName,
               ),
             ]);
 
